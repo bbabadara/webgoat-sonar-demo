@@ -1,0 +1,98 @@
+name: SonarQube - Éphémère sur le runner
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sonar-ephemeral:
+    name: SonarQube éphémère + analyse
+    runs-on: ubuntu-latest
+    env:
+      SONAR_ADMIN_PASSWORD: Admin12345!
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Start SonarQube (docker) sur le runner
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+          docker network create sonarnet
+          docker run -d --name sonarqube-db --network sonarnet \
+            -e POSTGRES_USER=sonar -e POSTGRES_PASSWORD=sonar -e POSTGRES_DB=sonar \
+            postgres:15-alpine
+          docker run -d --name sonarqube-ce --network sonarnet -p 9000:9000 \
+            -e SONAR_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar \
+            -e SONAR_JDBC_USERNAME=sonar -e SONAR_JDBC_PASSWORD=sonar \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+            -e SONAR_SEARCH_JAVA_ADDITIONAL_OPTS="-Xmx512m -Xms512m" \
+            -e SONAR_WEB_JAVA_ADDITIONAL_OPTS="-Xmx512m" \
+            -e SONAR_CE_JAVA_ADDITIONAL_OPTS="-Xmx512m" \
+            sonarqube:10.4-community
+
+      - name: Attendre que SonarQube soit prêt
+        run: |
+          for i in $(seq 1 90); do
+            status=$(curl -s http://localhost:9000/api/system/status | jq -r .status)
+            if [ "$status" = "UP" ]; then
+              echo "SonarQube est prêt (itération $i)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "SonarQube non prêt après 450s" && exit 1
+
+      - name: Générer un token d'analyse (API)
+        run: |
+          curl -s -u admin:admin -X POST "http://localhost:9000/api/authentication/login" -d "login=admin&password=admin" > /dev/null
+          curl -s -u admin:admin -X POST "http://localhost:9000/api/users/change_password" \
+            --data-urlencode "login=admin" \
+            --data-urlencode "previousPassword=admin" \
+            --data-urlencode "password=$SONAR_ADMIN_PASSWORD" > /dev/null
+          TOKEN=$(curl -s -u "admin:$SONAR_ADMIN_PASSWORD" -X POST "http://localhost:9000/api/user_tokens/generate" \
+            --data-urlencode "name=ci-run" | jq -r .token)
+          echo "SONAR_CI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "Token généré."
+
+      - name: Build & analyse SonarQube
+        env:
+          SONAR_CI_TOKEN: ${{ env.SONAR_CI_TOKEN }}
+        run: |
+          mvn -B -Djava.version=21 test org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+            -Dsonar.host.url=http://localhost:9000 \
+            -Dsonar.token=$SONAR_CI_TOKEN \
+            -Dsonar.projectKey=webgoat-demo \
+            -Dsonar.projectName="WebGoat Demo (éphémère)"
+
+      - name: Attendre la fin de l'analyse + statut Quality Gate
+        run: |
+          for i in $(seq 1 60); do
+            result=$(curl -s -u "admin:$SONAR_ADMIN_PASSWORD" \
+              "http://localhost:9000/api/ce/activity?component=webgoat-demo&type=REPORT" \
+              | jq -r '.tasks[0].status')
+            [ "$result" = "SUCCESS" ] && break
+            [ "$result" = "FAILED" ] && break
+            sleep 10
+          done
+          echo "=== Status de la dernière analyse ==="
+          curl -s -u "admin:$SONAR_ADMIN_PASSWORD" \
+            "http://localhost:9000/api/qualitygates/project_status?projectKey=webgoat-demo" | jq
+          echo "=== Dashboard ==="
+          echo "http://localhost:9000/dashboard?id=webgoat-demo"
+
+      - name: Arrêt des conteneurs
+        if: always()
+        run: |
+          docker rm -f sonarqube-ce sonarqube-db || true
+          docker network rm sonarnet || true
