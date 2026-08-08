@@ -58,6 +58,7 @@ TestClass.class
 webgoat.gitconfig
 node_modules/
 /test-results/
+/.scannerwork/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
