@@ -37,7 +37,7 @@ jobs:
                 -Dsonar.plugins.downloadOnlyRequired=true \
                 -Dsonar.host.url=$SONAR_HOST_URL \
                 -Dsonar.token=$SONAR_TOKEN \
-                -Dsonar.projectKey=webgoat-demo \
+                -Dsonar.projectKey=Webgoat-Demo \
                 -Dsonar.projectName="WebGoat Demo"; then
               echo "Analyse SonarQube réussie."
               exit 0
